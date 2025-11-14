@@ -81,7 +81,17 @@ def add_padding(image: np.ndarray, pad_ratio: float = 0.4) -> tuple[np.ndarray, 
     return padded, initial_points
 
 
-def order_points(points: np.ndarray) -> np.ndarray:
+def _order_points(points: np.ndarray) -> np.ndarray:
+    """Concise method of ordering corners of 4 vertex polygons.
+
+    Sum:
+    Top-left -> coord pair sum is minimized.
+    Bottom-right -> coord pair sum is maximized.
+
+    Diff (can be negative -> minimized when x>>y):
+    Top-right -- coord pair difference is minimized -> y<x.
+    Bottom-left -- coord pair difference is maximized -> y>x.
+    """
     rect = np.zeros((4, 2), dtype=np.float32)
     s = points.sum(axis=1)
     diff = np.diff(points, axis=1)
@@ -91,8 +101,38 @@ def order_points(points: np.ndarray) -> np.ndarray:
     rect[3] = points[np.argmax(diff)]  # bottom-left
     return rect
 
+def order_points(points: np.ndarray) -> np.ndarray:
+    """Return a new array where points are ordered [tl, tr, br, bl]."""
+    rect = np.zeros((4, 2), dtype=np.float32)
+    points_in_order_of_ascending_y_coord = np.argsort(points[:, 1])
+    # TOP
+    topmost_point_pair = points_in_order_of_ascending_y_coord[:2]
+    if points[topmost_point_pair[0]][0] < points[topmost_point_pair[1]][0]:
+        topmost_pair_lower_x_index = topmost_point_pair[0]
+        topmost_pair_higher_x_index = topmost_point_pair[1]
+    else:
+        topmost_pair_lower_x_index = topmost_point_pair[1]
+        topmost_pair_higher_x_index = topmost_point_pair[0]
+    rect[0] = points[topmost_pair_lower_x_index]  # top-left
+    rect[1] = points[topmost_pair_higher_x_index]  # top-right
+    # BOTTOM
+    bottommost_point_pair = points_in_order_of_ascending_y_coord[-2:]
+    if points[bottommost_point_pair[0]][0] < points[bottommost_point_pair[1]][0]:
+        bottommost_pair_lower_x_index = bottommost_point_pair[0]
+        bottommost_pair_higher_x_index = bottommost_point_pair[1]
+    else:
+        bottommost_pair_lower_x_index = bottommost_point_pair[1]
+        bottommost_pair_higher_x_index = bottommost_point_pair[0]
+    rect[2] = points[bottommost_pair_higher_x_index]  # bottom-right
+    rect[3] = points[bottommost_pair_lower_x_index]  # bottom-left
+    return rect
 
-def warp_from_points(image: np.ndarray, points: np.ndarray) -> np.ndarray:
+
+def warp_from_points(
+    image: np.ndarray,
+    points: np.ndarray,
+    canvas_size: tuple[int, int] | None = None,
+) -> np.ndarray:
     rect = order_points(points)
     width_a = float(np.linalg.norm(rect[2] - rect[3]))
     width_b = float(np.linalg.norm(rect[1] - rect[0]))
@@ -105,7 +145,27 @@ def warp_from_points(image: np.ndarray, points: np.ndarray) -> np.ndarray:
         dtype=np.float32,
     )
     matrix = cv2.getPerspectiveTransform(rect, dst)
-    return cv2.warpPerspective(image, matrix, (target_w, target_h))
+    warped = cv2.warpPerspective(image, matrix, (target_w, target_h))
+
+    if not canvas_size:
+        return warped
+
+    canvas_w, canvas_h = canvas_size
+    if warped.shape[1] == canvas_w and warped.shape[0] == canvas_h:
+        return warped
+
+    scale = min(canvas_w / max(1, warped.shape[1]), canvas_h / max(1, warped.shape[0]))
+    scaled_w = max(1, int(round(warped.shape[1] * scale)))
+    scaled_h = max(1, int(round(warped.shape[0] * scale)))
+    if (scaled_w, scaled_h) != (warped.shape[1], warped.shape[0]):
+        interpolation = cv2.INTER_LINEAR if scale > 1 else cv2.INTER_AREA
+        warped = cv2.resize(warped, (scaled_w, scaled_h), interpolation=interpolation)
+
+    result = np.zeros((canvas_h, canvas_w, 3), dtype=warped.dtype)
+    offset_x = (canvas_w - warped.shape[1]) // 2
+    offset_y = (canvas_h - warped.shape[0]) // 2
+    result[offset_y : offset_y + warped.shape[0], offset_x : offset_x + warped.shape[1]] = warped
+    return result
 
 
 def resize_to_height(image: np.ndarray, height: int) -> np.ndarray:
@@ -203,9 +263,13 @@ def main() -> None:
         while True:
             annotated = draw_overlay(padded, points, context["selected"])
             try:
-                warped = warp_from_points(padded, points)
+                warped = warp_from_points(
+                    padded,
+                    points,
+                    canvas_size=(padded.shape[1], padded.shape[0]),
+                )
             except cv2.error:
-                warped = np.zeros((padded.shape[0], padded.shape[1], 3), dtype=np.uint8)
+                warped = np.zeros_like(padded)
             display = build_display(annotated, warped)
             cv2.imshow(WINDOW_NAME, display)
 
